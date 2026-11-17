@@ -1,393 +1,610 @@
-# 03 — Container Lifecycle and Management
+# 03 - Docker Container Lifecycle and Management
 
-A container can start successfully and still stop a few seconds later. It can also be running without the application inside it working correctly.
+## Introduction
 
-To manage containers properly, understand three things:
+Starting a Docker container is easy. Managing it correctly is what matters in real-world environments.
 
-1. **Lifecycle** — what makes a container start, run, stop, and disappear.
-2. **Inspection** — how to find out what happened and collect evidence.
-3. **Control** — how to start, stop, restart, remove, and automatically recover containers.
+A container may start and exit immediately, remain running while the application is unhealthy, or stop unexpectedly because its main process has failed.
 
-This guide combines the three episodes into one practical reference.
+To manage containers properly, you need to understand:
+
+- How a container moves through its lifecycle.
+- Why PID 1 controls the container's running lifetime.
+- How to inspect container configuration and state.
+- How to retrieve container logs.
+- How to execute commands inside a running container.
+- How to start, stop, restart, kill, and remove containers.
+- How Docker restart policies behave.
+
+This module covers these concepts through three episodes.
 
 ---
 
+# Episode 1: Understanding the Container Lifecycle
+
 ## 1. The Container Started, Then Vanished
 
-Imagine starting a payment service:
+Imagine an engineer starts a new `payment-service` container on `server-01`.
+
+Docker prints a container ID, but when the engineer runs `docker ps`, the container does not appear.
+
+Did the container disappear?
+
+Not necessarily. It may have started successfully and then exited.
+
+Remember the fundamental rule:
+
+> A container remains running as long as its main process, PID 1, is running.
+
+To understand what happened, you must distinguish between a container's existence and its running state.
+
+## 2. Think in States, Not Commands
+
+A Docker container moves through a lifecycle:
+
+```text
+created → running → exited → removed
+```
+
+Each state represents something different.
+
+| State | Meaning |
+|---|---|
+| `created` | Docker has created the container, but its main process has not started. |
+| `running` | The container's main process is running. |
+| `exited` | The main process has ended, but the container still exists. |
+| `removed` | The container has been deleted. Its container identity and writable layer are gone. |
+
+The `removed` state is terminal for that particular container identity.
+
+You can create another container from the same image, but it will be a new container.
+
+### What happens when you run docker run?
+
+Consider:
 
 ```bash
 docker run nginx
 ```
 
-Docker returns a container ID, but when you run:
+Docker performs two operations:
 
-```bash
-docker ps
-```
+1. Creates a new container.
+2. Starts the container's main process.
 
-the container is not listed.
-
-That does not necessarily mean Docker failed to create it. The container may have started and then exited.
-
-### 1.1 Understand the container lifecycle
-
-A container moves through a few main states:
+Conceptually:
 
 ```text
-Created  ── start ──>  Running
-                         │
-                         │ main process exits
-                         ▼
-                       Exited
-                         │
-                         │ docker rm
-                         ▼
-                       Removed
+BEFORE:
+No container
+
+COMMAND:
+docker run nginx
+
+AFTER:
+Container created → Container started
 ```
 
-- **Created:** The container object exists, but its main process has not started.
-- **Running:** Its main process is running.
-- **Exited:** Its main process has stopped. The container object still exists.
-- **Removed:** The container object has been deleted.
+`docker run` does not guarantee that the container will remain running forever.
 
-A removed container cannot be started again. You can create another container from the same image, but that is a new container with a new identity.
+The main process might complete its work and exit immediately.
 
-### 1.2 A container's life depends on its main process
+### Quick Example
 
-A container is not a small virtual machine that stays alive simply because it was created.
+```bash
+docker run alpine echo "Hello Docker"
+```
 
-Its running lifetime is tied to its main process, commonly called **PID 1** inside the container.
+The container prints:
+
+```text
+Hello Docker
+```
+
+Then it exits.
+
+This is expected because `echo` is a short-lived process. Once it finishes, there is no main process left to keep the container running.
+
+## 3. PID 1 Defines the Container's Running Lifetime
+
+Inside a container's PID namespace, the configured main process normally becomes PID 1.
+
+Docker considers the container running while this main process is running.
 
 For example:
 
 ```bash
-docker run alpine
+docker run nginx
 ```
 
-If the image's default command finishes immediately, the container exits.
+The Nginx process runs in the foreground and keeps the container alive.
 
-Try this:
+But consider an application that starts its service in the background and then exits.
+
+```text
+Container starts
+      |
+      v
+Application starts in background
+      |
+      v
+Startup script finishes
+      |
+      v
+PID 1 exits
+      |
+      v
+Container exits
+```
+
+The background process might not behave as the application author expected. The container's lifecycle is tied to its main process, not simply to whether some process was started earlier.
+
+**Important:** Keep the actual application in the foreground whenever possible so that it remains the container's main process.
+
+### A Stand-in Process Is Not the Application
+
+You might see commands such as:
 
 ```bash
-docker run alpine echo "Hello from Docker"
+sleep infinity
 ```
 
-The command prints the message and finishes. Once the main process exits, the container exits too.
+This keeps the `sleep` process running.
 
-This is expected behavior.
+However:
 
-> **Important:** A container can exit successfully. An exit code of `0` means the process reported success; it does not mean the container should remain running.
+```text
+sleep is running
+        ≠
+payment-service is running
+```
 
-### 1.3 Understand the `docker run` command
+A container can have a running status without providing the intended application service.
 
-General syntax:
+Use `sleep infinity` for temporary learning or diagnostic environments, not as a replacement for a properly configured application process.
+
+## 4. Understanding docker run Options
+
+The general syntax is:
 
 ```bash
 docker run [OPTIONS] IMAGE [COMMAND] [ARG...]
 ```
 
-For example:
+- `OPTIONS` configure container behavior.
+- `IMAGE` identifies the image to use.
+- `COMMAND` overrides the image's configured command.
+- `ARG...` provides arguments to that command.
+
+### Give Containers a Name
 
 ```bash
-docker run --name web-server -d nginx
+docker run --name payment-service nginx
 ```
 
-- `docker run` creates and starts a container.
-- `--name web-server` assigns it a readable name.
-- `-d` runs it in detached mode.
-- `nginx` is the image.
+`--name` assigns a human-readable name to the container.
 
-Options go before the image name. A command written after the image overrides the image's configured default command.
+Without it, Docker generates a name automatically.
 
-### 1.4 Container names
-
-Without a name, Docker assigns a random name.
+Names make containers easier to identify and manage:
 
 ```bash
-docker run -d nginx
+docker start payment-service
+docker stop payment-service
+docker logs payment-service
 ```
 
-You can assign your own name:
+A container name must be unique on the Docker daemon.
+
+Even an exited container continues to own its name until it is removed.
+
+### Detached Mode: -d
 
 ```bash
 docker run -d --name payment-service nginx
 ```
 
-Names make it easier to inspect and manage containers:
+The `-d` option runs the container in detached mode.
 
-```bash
-docker logs payment-service
-docker inspect payment-service
-docker stop payment-service
+Docker returns control of the terminal while the container continues running independently.
+
+This is useful for services that should run without occupying your current terminal.
+
+Remember:
+
+```text
+-d = Run without attaching the current terminal
 ```
 
-A container name must be unique on that Docker daemon. If a stopped container still owns the name, you cannot use that name for another container until the old one is removed or renamed.
+Detached mode does not guarantee that the application will stay alive. PID 1 can still exit immediately.
 
-### 1.5 Detached and interactive modes
-
-**Detached mode (`-d`)**
+### Interactive Terminal Mode: -it
 
 ```bash
-docker run -d --name web nginx
+docker run -it alpine sh
 ```
 
-Docker starts the container and returns control to your terminal.
+Two options are combined here:
 
-Detached mode does not guarantee that the container will keep running. If its main process exits, the container exits too.
+| Option | Meaning |
+|---|---|
+| `-i` | Keeps standard input open. |
+| `-t` | Allocates a terminal-like interface. |
 
-**Interactive mode (`-i` and `-t`)**
+Together, `-it` is useful when you need to interact with a process through your terminal.
+
+For example:
 
 ```bash
-docker run -it --name alpine-shell alpine sh
+docker run -it ubuntu bash
 ```
 
-- `-i` keeps standard input open.
-- `-t` allocates a terminal (TTY).
-- `-it` is commonly used when you want to interact with a shell.
+You can now interact with the shell inside the container.
 
-If the shell is the container's main process and you exit the shell, PID 1 exits and the container stops.
-
-For a temporary learning container, you may see commands such as:
+When you type:
 
 ```bash
-docker run -d --name test-container alpine sleep infinity
+exit
 ```
 
-This keeps the `sleep` process running. It is useful for experiments, but it does not prove that a real application or service is healthy.
+The shell exits.
 
-### 1.6 `docker ps` versus `docker ps -a`
+If that shell is PID 1, the container also exits.
+
+Remember:
+
+```text
+-d  → Detached operation
+
+-it → Interactive terminal
+```
+
+These options change how you interact with the container. They do not change the PID 1 lifecycle rule.
+
+## 5. See Running and Exited Containers
+
+Docker provides two important commands for viewing containers.
+
+### Show Running Containers
 
 ```bash
 docker ps
 ```
 
-Shows running containers only.
+By default, this command shows only running containers.
+
+If the output is empty, it means there are no containers currently running on the selected Docker daemon.
+
+It does not mean that no containers were created.
+
+### Show All Containers
 
 ```bash
 docker ps -a
 ```
 
-Shows all retained containers, including created and exited containers.
+The `-a` option includes containers that have exited or are otherwise retained.
 
-If a container is missing from `docker ps`, check:
+Example:
 
-```bash
-docker ps -a
+```text
+CONTAINER ID   IMAGE     COMMAND       STATUS
+a1b2c3d4       alpine    "echo Hello"  Exited (0) 10 seconds ago
 ```
 
-The difference matters:
+This tells us:
 
-| Command | What it shows |
-|---|---|
-| `docker ps` | Running containers |
-| `docker ps -a` | All containers that have not been removed |
+- The container still exists.
+- Its main process has finished.
+- Docker recorded an exit status of `0`.
 
-If a container does not appear in either list, it may have been removed, or you may be looking at a different Docker daemon/context.
+Use the following approach before changing a container:
 
-### 1.7 What does `--rm` do?
+```text
+LIST
+  ↓
+IDENTIFY
+  ↓
+CONFIRM STATE
+  ↓
+CHANGE
+  ↓
+VERIFY
+```
+
+## 6. Understanding --rm
+
+Normally, when a container exits, Docker retains the container object.
+
+You can inspect it, read its logs, and start it again.
+
+But sometimes you only need a container for a temporary task.
+
+For that, Docker provides `--rm`.
 
 ```bash
 docker run --rm alpine echo "Temporary task"
 ```
 
-The `--rm` option tells Docker to automatically remove the container after its main process exits.
+Docker automatically removes the container after it exits.
 
-This is useful for disposable tasks, such as one-off commands and temporary tests.
+Compare the behavior:
 
-However, once the container is automatically removed:
+**Without `--rm`:**
 
-- You cannot restart that same container.
-- Its container object and writable layer are gone.
-- You lose the opportunity to inspect that retained container later.
-- Logs or other evidence may no longer be available through that container.
+```text
+running → exited → retained
+```
 
-Use `--rm` when you are sure you do not need the stopped container for troubleshooting.
+You can inspect or restart the same container.
 
-**Remember:** `--rm` and restart policies are not meant to be used together. A container configured for automatic removal is not a container that Docker can keep around and restart.
+**With `--rm`:**
+
+```text
+running → exited → removed
+```
+
+The container is automatically deleted.
+
+### When Should You Use --rm?
+
+Use it for:
+
+- Temporary testing.
+- One-time commands.
+- Disposable troubleshooting containers.
+- Short-lived tasks that do not need later investigation.
+
+Avoid it when you need to:
+
+- Inspect the container after it exits.
+- Read its retained logs.
+- Restart the same container.
+- Preserve its writable layer for investigation.
+
+Docker also does not allow combining automatic removal with a restart policy. One requests removal after exit; the other requests automatic restarting.
 
 ---
 
-## 2. Running Is Not the Same as Working
+## Episode 1: Important Takeaways
 
-Suppose a production container is running, but users report that the application is unavailable.
+- A container moves through `created → running → exited → removed`.
+- `docker run` creates and starts a container.
+- PID 1 controls the container's running lifetime.
+- `-d` runs a container in detached mode.
+- `-it` provides an interactive terminal.
+- `docker ps` shows running containers.
+- `docker ps -a` includes retained exited containers.
+- `--rm` automatically removes a container after it exits.
 
-Should you restart it immediately?
+---
 
-Not necessarily.
+# Episode 2: Inspect, Logs, and Exec
 
-A running container only tells you that its main process is still running. It does not prove that the application is healthy, ready, or serving requests correctly.
+## 1. Running Is Not the Same as Working
 
-Before changing anything, collect evidence.
+Imagine the `checkout-service` container is listed as running, but customers cannot complete their payments.
 
-A useful troubleshooting sequence is:
+One engineer immediately wants to restart it.
+
+Another wants to open a shell and investigate.
+
+But before changing anything, we need to understand what is happening.
+
+A container being `running` only tells us that its main process is running. It does not guarantee that the application is healthy or responding correctly.
+
+Docker provides three important tools for investigation:
 
 ```text
-INSPECT  →  CHECK LOGS  →  EXECUTE A TARGETED CHECK
+inspect → Structured container configuration and state
+
+logs    → Captured standard output and standard error
+
+exec    → Start a new process inside a running container
 ```
 
-### 2.1 Inspect a container
+Each tool answers a different question.
+
+## 2. Understanding docker inspect
+
+The `docker inspect` command returns detailed information about a Docker object.
+
+For example:
 
 ```bash
 docker inspect payment-service
 ```
 
-`docker inspect` returns detailed information about a Docker object in JSON format.
+It returns JSON containing information about the selected container.
 
-It can show:
+You can use it to understand:
 
 - Container configuration.
-- Current state.
-- Exit code and timestamps.
-- Image and startup command.
-- Restart policy and restart count.
-- Network configuration.
+- Current lifecycle state.
+- Exit code.
+- Startup command.
+- Entrypoint.
+- Restart policy.
+- Network attachments.
+- Mount configuration.
 
-The output is large, so use `--format` to extract the fields you need.
+### Important Fields
 
-**Check the current state:**
+| Field | Meaning |
+|---|---|
+| `.Name` | Container name. |
+| `.State.Status` | Current container state. |
+| `.State.Running` | Whether the main process is running. |
+| `.State.ExitCode` | Recorded exit code. |
+| `.State.StartedAt` | Last recorded start time. |
+| `.State.FinishedAt` | Last recorded finish time. |
+| `.State.Error` | Recorded error information, if available. |
+| `.Config.Image` | Image reference used by the container. |
+| `.Config.Entrypoint` | Configured entrypoint. |
+| `.Config.Cmd` | Configured command and arguments. |
+| `.RestartCount` | Number of recorded restarts. |
+| `.HostConfig.RestartPolicy` | Configured restart policy. |
+| `.NetworkSettings.Networks` | Network attachment information. |
+
+Field availability and behavior can depend on the Docker object and version.
+
+### Extract Specific Information with --format
+
+The complete JSON output can be large.
+
+You can use `--format` to retrieve only the information you need.
+
+Check the container status:
 
 ```bash
-docker inspect payment-service --format '{{.State.Status}}'
+docker inspect --format '{{.State.Status}}' payment-service
 ```
 
-Possible output:
+Example:
 
 ```text
 running
 ```
 
-**Check whether the container is running:**
+Check the exit code:
 
 ```bash
-docker inspect payment-service --format '{{.State.Running}}'
+docker inspect --format '{{.State.ExitCode}}' payment-service
 ```
 
-**Check the exit code:**
+Retrieve multiple values:
 
 ```bash
-docker inspect payment-service --format '{{.State.ExitCode}}'
+docker inspect --format 'status={{.State.Status}} exit={{.State.ExitCode}} restarts={{.RestartCount}}' payment-service
 ```
 
-**Check when it started and finished:**
+Example:
+
+```text
+status=exited exit=1 restarts=0
+```
+
+Docker uses Go template syntax for these formatting expressions.
+
+Field names and capitalization matter.
+
+### Understanding JSON Output
+
+Some configuration fields are arrays rather than simple strings.
+
+For example, a command might be represented as:
+
+```json
+["serve", "--config", "/app/config.yaml"]
+```
+
+Use the `json` template function to preserve the structure:
 
 ```bash
-docker inspect payment-service --format '{{.State.StartedAt}}'
-docker inspect payment-service --format '{{.State.FinishedAt}}'
+docker inspect --format '{{json .Config.Cmd}}' payment-service
 ```
 
-**Check the configured image and command:**
+You can also inspect network attachments:
 
 ```bash
-docker inspect payment-service --format '{{.Config.Image}}'
-docker inspect payment-service --format '{{.Config.Entrypoint}}'
-docker inspect payment-service --format '{{json .Config.Cmd}}'
+docker inspect --format '{{json .NetworkSettings.Networks}}' payment-service
 ```
 
-**Check restart information:**
+A container can be attached to multiple networks.
 
-```bash
-docker inspect payment-service --format '{{.RestartCount}}'
-docker inspect payment-service --format '{{json .HostConfig.RestartPolicy}}'
-```
+Its IP address belongs to a particular network, so always consider the network name when interpreting an IP address.
 
-The exact values depend on the container's configuration and Docker version.
+**Why use JSON?**
 
-### 2.2 Why use `{{json ...}}`?
+JSON preserves argument boundaries and nested structures. Joining values into one string can make it difficult to understand which text belongs to which argument.
 
-Docker's `--format` option uses Go templates.
+## 3. Understanding docker logs
 
-For a simple value, you can print the field directly:
+Applications running inside containers commonly write messages to:
 
-```bash
-docker inspect payment-service --format '{{.State.Status}}'
-```
+- Standard output (`stdout`).
+- Standard error (`stderr`).
 
-For an array or map, use the `json` template function:
+Docker can capture these streams through the configured logging mechanism.
 
-```bash
-docker inspect payment-service --format '{{json .Config.Cmd}}'
-```
-
-You can also inspect network configuration:
-
-```bash
-docker inspect payment-service --format '{{json .NetworkSettings.Networks}}'
-```
-
-This is useful because fields such as commands and network settings can contain structured data.
-
-Template field names are case-sensitive. Also, do not assume every container has the same network name or IP address.
-
-### 2.3 Read container logs
+To retrieve the output:
 
 ```bash
 docker logs payment-service
 ```
 
-Docker logs can help answer questions such as:
+This is useful when:
 
-- Did the application start?
-- Did it report a configuration error?
-- Did it fail to connect to a database?
-- Did it receive a shutdown signal?
-- Did it report an exception?
+- An application fails to start.
+- A container exits unexpectedly.
+- A service reports an error.
+- You need to understand what happened before a failure.
 
-Useful options:
+### Useful Log Options
 
-**Show only the latest 50 lines:**
+Show the last 50 lines:
 
 ```bash
 docker logs --tail 50 payment-service
 ```
 
-**Show logs from the last 10 minutes:**
+Show logs from the last 10 minutes:
 
 ```bash
 docker logs --since 10m payment-service
 ```
 
-**Follow new log output:**
+Follow new log output:
 
 ```bash
 docker logs -f payment-service
 ```
 
-You can combine options:
+The `-f` option continuously follows new log messages.
 
-```bash
-docker logs --since 10m --tail 50 -f payment-service
+Pressing `Ctrl+C` stops following the logs. It does not stop the container.
+
+### Logs Are Not Every Application Log
+
+An important distinction:
+
+`docker logs` does not automatically search every file inside the container.
+
+For example, suppose an application writes logs to:
+
+```text
+/var/log/app.log
 ```
 
-Pressing `Ctrl+C` stops following the log output in your terminal. It does not stop the container.
+Those messages will not automatically appear through `docker logs`.
 
-### 2.4 Where do Docker logs come from?
+The configured logging driver also matters. Some logging drivers do not support local log retrieval in the same way, and log rotation or retention can remove older output.
 
-`docker logs` displays the container process's captured standard output (`stdout`) and standard error (`stderr`), subject to the configured logging driver and its settings.
+Remember:
 
-For example, an application that writes startup messages to the console can make those messages available through:
-
-```bash
-docker logs payment-service
+```text
+No output from docker logs
+          ≠
+No application error
 ```
 
-But `docker logs` is not a command for reading every log file inside the container.
+It only means that the selected logging retrieval path returned no output for that query.
 
-Keep these points in mind:
+### Can You Read Logs from an Exited Container?
 
-- Applications should generally write container logs to `stdout` and `stderr`.
-- The logging driver controls how Docker handles log output.
-- Log rotation and retention settings affect how much history is available.
-- A lack of output does not prove that no error occurred.
-- Logs may not be available in the same way with every logging-driver configuration.
+Yes.
 
-You can often read logs from an exited container as long as the container remains and its logs are still available.
+If the container still exists and its logging configuration retains accessible output, you can read its logs even after the main process exits.
 
-### 2.5 Execute a command inside a running container
+This is one reason not to remove a failed container before investigating it.
 
-Use `docker exec` to start an additional process inside an already-running container.
+## 4. Understanding docker exec
 
-General syntax:
+Sometimes logs and inspection are not enough.
+
+You may need to run a command inside the container to investigate the environment.
+
+Docker provides:
 
 ```bash
 docker exec CONTAINER COMMAND [ARG...]
@@ -399,517 +616,959 @@ For example:
 docker exec payment-service printenv APP_ENV
 ```
 
-To open a shell, if the image contains one:
+This starts a new process inside the running container.
+
+### Open an Interactive Shell
+
+If the image contains a shell, you can use:
 
 ```bash
 docker exec -it payment-service sh
 ```
 
-Some images include Bash:
+Or, if Bash is available:
 
 ```bash
 docker exec -it payment-service bash
 ```
 
-Minimal images may not contain `bash`, `sh`, or common troubleshooting tools. In that case, use an available executable or another debugging approach.
+The important point is that `docker exec` creates a new process.
 
-### 2.6 `docker exec` does not replace PID 1
+Conceptually:
 
-This distinction is important.
-
-When you run:
-
-```bash
+```text
+Container is already running
+          |
+          v
 docker exec -it payment-service sh
+          |
+          v
+New shell process starts
+          |
+          v
+You interact with the shell
+          |
+          v
+You type exit
+          |
+          v
+Only the exec shell exits
 ```
 
-Docker starts a new process inside the running container. That shell is not the container's main process.
+The main application continues running as long as PID 1 remains alive.
 
-If you exit the shell, the application can continue running.
+### docker exec Is Not SSH
 
-Compare:
+This is a common misunderstanding.
 
-| Situation | Result |
-|---|---|
-| Start a container whose main command is `sh`, then exit the shell | The main process exits, so the container stops |
-| Run `docker exec -it container sh`, then exit the shell | Only the additional shell exits; the main process can continue |
+SSH normally requires:
 
-`docker exec` is not SSH. It does not create an SSH connection or require an SSH server inside the container. Docker asks the Docker daemon to start another process in the container.
+- An SSH server.
+- A network connection.
+- Authentication.
+- A remote login session.
 
-Also remember that access to the Docker daemon is powerful. Someone who can control Docker may be able to gain extensive access to the host.
+Docker exec works differently.
 
-### 2.7 A practical troubleshooting order
+```text
+docker exec
+     |
+     v
+Docker daemon
+     |
+     v
+Starts a new process inside the existing container
+```
 
-When a service is reported as unavailable, avoid immediately restarting or removing its container.
+It does not require an SSH server or a network login.
 
-Start with:
+Access to the Docker daemon is powerful because it allows an operator to start processes inside containers.
+
+### A Container Might Not Have a Shell
+
+Minimal container images often do not include:
+
+- Bash.
+- Sh.
+- Curl.
+- Ps.
+- Other diagnostic utilities.
+
+For example:
 
 ```bash
-docker ps -a
-docker inspect payment-service
-docker logs --tail 100 payment-service
+docker exec -it payment-service bash
 ```
 
-If the container is running and you need to verify something from inside it:
+may fail because Bash is not installed.
+
+That does not automatically mean the container is broken.
+
+Prefer running a focused command when possible:
 
 ```bash
 docker exec payment-service printenv APP_ENV
 ```
 
-Then check the application itself, its dependencies, network connectivity, and health/readiness indicators as appropriate.
+Avoid installing debugging tools into production containers unnecessarily. Changing the running container can make it different from the image and weaken reproducibility.
 
-**Key distinction:**
+### Important Limitation
 
-- **Running:** The container's main process is running.
-- **Healthy:** A configured health check reports that the application meets its health condition.
-- **Ready:** The application is prepared to accept the work or traffic expected of it.
+`docker exec` requires the container to be running.
 
-These are not interchangeable.
+You cannot use it to start a process inside an exited container.
+
+For an exited container, investigate its retained state and logs instead.
 
 ---
 
-## 3. Recovery or Evidence Destruction?
+## 5. Which Tool Should You Use?
 
-Once you understand the container's state and have collected useful evidence, you can decide what action to take.
+| Question | Command |
+|---|---|
+| What state did Docker record? | `docker inspect` |
+| What exit code was recorded? | `docker inspect` |
+| What command is configured? | `docker inspect` |
+| What did the application write to stdout or stderr? | `docker logs` |
+| How do I follow new log messages? | `docker logs -f` |
+| How do I run a command inside a running container? | `docker exec` |
 
-Docker provides several lifecycle commands. They do different jobs.
+A useful troubleshooting approach is:
 
-### 3.1 Start an existing container
+```text
+OBSERVE
+   |
+   v
+Inspect state and configuration
+   |
+   v
+CORRELATE
+   |
+   v
+Compare logs with the reported problem
+   |
+   v
+INTERACT IF NEEDED
+   |
+   v
+Run a focused command using exec
+   |
+   v
+CHANGE
+   |
+   v
+VERIFY
+```
+
+Reading evidence first helps avoid unnecessary restarts and changes.
+
+## 6. Common Mistakes
+
+### Mistake 1: Treating inspect as a Health Check
+
+A `running` status means the main process is running.
+
+It does not prove that:
+
+- The application is ready.
+- Dependencies are available.
+- Requests are succeeding.
+- Customers can reach the service.
+
+### Mistake 2: Assuming docker logs Shows Every Log File
+
+Docker logs retrieves captured process output through the configured logging mechanism.
+
+It does not automatically read every log file inside the container.
+
+### Mistake 3: Treating exec as SSH
+
+`docker exec` starts a new process through the Docker daemon. It is not a remote SSH login.
+
+### Mistake 4: Trying exec on an Exited Container
+
+`docker exec` requires a running container.
+
+Use `inspect` and `logs` to investigate an exited container.
+
+---
+
+## Episode 2: Important Takeaways
+
+- `docker inspect` retrieves structured configuration and state.
+- `--format` extracts specific values.
+- `{{json ...}}` preserves arrays and nested structures.
+- `docker logs` retrieves captured stdout and stderr.
+- `docker logs -f` follows new log output.
+- Logs can remain available after a container exits.
+- `docker exec` starts a new process inside a running container.
+- Exiting an exec shell does not normally stop the main application.
+- `docker exec` is not SSH and does not require an SSH server.
+
+---
+
+# Episode 3: Container Recovery, Termination, and Restart Policies
+
+## 1. Recovery or Evidence Destruction?
+
+Imagine the `auth-service` container becomes unhealthy during a production incident.
+
+An operator wants to immediately kill and remove it, then create a fresh container.
+
+But doing so can destroy useful evidence.
+
+Before taking action, ask:
+
+- What state is the container in?
+- What evidence should be preserved?
+- Does the application support graceful shutdown?
+- Should the existing container be restarted or replaced?
+- How will the final service outcome be verified?
+
+Docker provides different lifecycle commands for different purposes.
+
+## 2. Understanding Container Lifecycle Commands
+
+| Command | Purpose |
+|---|---|
+| `docker start` | Starts an existing stopped container. |
+| `docker stop` | Requests graceful termination. |
+| `docker restart` | Stops and starts the same container. |
+| `docker kill` | Sends a signal to the main process; defaults to SIGKILL. |
+| `docker rm` | Removes a stopped container. |
+
+### Start an Existing Container
+
+Suppose a container has exited:
 
 ```bash
 docker start payment-service
 ```
 
-Starts an existing created or stopped container.
+This starts the existing container again.
 
-It reuses the same container object and its retained configuration and writable layer.
+It reuses:
 
-Use `docker start` when you want to start that existing container again.
+- The same container identity.
+- The existing configuration.
+- The existing writable layer.
 
-### 3.2 Restart a container
+It does not create a new container from the image.
+
+Conceptually:
+
+```text
+BEFORE:
+payment-service → exited
+
+COMMAND:
+docker start payment-service
+
+AFTER:
+payment-service → running
+```
+
+If the original problem was caused by incorrect configuration, starting the same container may reproduce the same failure.
+
+### Restart an Existing Container
 
 ```bash
 docker restart payment-service
 ```
 
-A restart stops the container and starts the same container again.
+For a running container, Docker performs:
 
-It does not create a new container.
+```text
+running → exited → running
+```
 
-A restart can be useful when an application needs to be restarted, but it changes the running process and lifecycle timestamps. If you restart before collecting evidence, you may lose useful information about the original failure.
+It stops and starts the same container.
 
-### 3.3 Stop a container gracefully
+A restart can help recover from a temporary problem, but it also changes process state and timestamps.
+
+Before restarting during an incident, preserve any evidence you may need.
+
+**Important:** `docker restart` does not create a new container from the image.
+
+## 3. Understanding Graceful Shutdown: docker stop
+
+When you stop a container, Docker normally gives the main process an opportunity to shut down gracefully.
 
 ```bash
 docker stop payment-service
 ```
 
-By default, Docker sends the container's configured stop signal. This is normally `SIGTERM`.
+By default, Docker:
 
-Docker then waits for a grace period (10 seconds by default). If the main process has not exited by the end of that period, Docker sends `SIGKILL`.
+1. Sends SIGTERM to the container's main process.
+2. Waits for the configured stop timeout.
+3. Sends SIGKILL if the process has not exited.
 
-You can change the timeout:
+The default timeout is 10 seconds.
+
+Conceptually:
+
+```text
+docker stop
+     |
+     v
+Send SIGTERM
+     |
+     v
+Wait for graceful shutdown
+     |
+     +---- Process exits ----> Container exits
+     |
+     +---- Timeout expires
+                 |
+                 v
+             Send SIGKILL
+                 |
+                 v
+             Container exits
+```
+
+### What Is SIGTERM?
+
+SIGTERM is a termination signal.
+
+It gives the application an opportunity to handle the shutdown request.
+
+A well-designed application can use this time to:
+
+- Stop accepting new requests.
+- Finish or reject ongoing requests safely.
+- Flush buffered output.
+- Close network connections.
+- Release resources.
+
+### Configure the Stop Timeout
+
+Some applications need more than 10 seconds to shut down safely.
+
+You can configure the timeout:
 
 ```bash
 docker stop --time 30 payment-service
 ```
 
-This gives the process up to 30 seconds to stop before Docker forcefully terminates it.
+Docker now waits up to 30 seconds before sending SIGKILL.
 
-A well-behaved application should respond to a graceful shutdown by doing things such as:
+The correct timeout depends on the application's actual shutdown behavior.
 
-1. Stop accepting new work.
-2. Finish or safely cancel work already in progress.
-3. Flush important data and logs.
-4. Close database connections and other resources.
-5. Exit cleanly.
+### The Stop Signal Can Be Configured
 
-The application must handle the stop signal correctly. Process wrappers and shell scripts can affect whether signals reach the intended application process.
+SIGTERM is the normal default, but Docker also supports a configured stop signal.
 
-### 3.4 What is `SIGTERM`?
+Image `STOPSIGNAL` metadata or container settings can change which signal is used.
 
-`SIGTERM` is a termination signal asking a process to stop.
+Therefore, do not assume every container always receives SIGTERM.
 
-It gives the application an opportunity to perform cleanup before exiting.
+### PID 1 Must Handle the Signal Correctly
 
-For example, a web application may stop accepting new requests, finish current requests, close connections, and then exit.
+A process may not shut down properly if the entrypoint or shell wrapper does not forward signals to the actual application.
 
-### 3.5 What is `SIGKILL`?
+For example:
 
-`SIGKILL` forces a process to terminate. The process cannot catch or ignore it and cannot perform its own graceful cleanup.
+```text
+Docker sends signal
+       |
+       v
+Container PID 1
+       |
+       v
+Application process
+```
 
-Docker's `kill` command sends `SIGKILL` by default:
+If the main process ignores the signal or does not forward it correctly, Docker may eventually use SIGKILL.
+
+This is why proper process management and foreground execution matter.
+
+## 4. Understanding docker kill
+
+Sometimes a process does not terminate, or you intentionally need to test abrupt termination.
+
+Docker provides:
 
 ```bash
 docker kill payment-service
 ```
 
-You can specify another signal:
+By default, Docker sends SIGKILL to the container's main process.
+
+Unlike SIGTERM, SIGKILL cannot be caught or handled by the process.
+
+The application does not receive a graceful cleanup opportunity.
+
+### Send a Different Signal
+
+You can also specify another signal:
 
 ```bash
 docker kill --signal SIGHUP payment-service
 ```
 
-The effect of a signal other than `SIGKILL` depends on how the application handles it.
+The effect depends on how the application handles that signal.
 
-Use `docker kill` when forceful termination is necessary, not as the normal first choice for stopping an application.
+Do not send signals randomly in production.
 
-### 3.6 `docker stop` versus `docker kill`
+### Stop vs Kill
 
-| Command | Default behavior | Cleanup opportunity |
+| Feature | `docker stop` | `docker kill` |
 |---|---|---|
-| `docker stop` | Sends the configured stop signal, waits, then sends `SIGKILL` if needed | Yes, during the grace period |
-| `docker kill` | Sends `SIGKILL` by default | No graceful cleanup |
+| Default signal | SIGTERM | SIGKILL |
+| Graceful shutdown opportunity | Yes | No |
+| Timeout | 10 seconds by default | No graceful timeout by default |
+| Can force termination | Yes, after timeout | Yes, immediately by default |
+| Typical purpose | Normal shutdown | Abrupt termination or signal testing |
 
-A simple way to remember:
+Use `docker stop` for normal operational shutdown.
 
-- `stop` gives the application time to shut down.
-- `kill` forcefully terminates it by default.
+Use `docker kill` when an immediate signal is required and you understand the consequences.
 
-### 3.7 Understand container exit codes
+## 5. Understanding Container Exit Codes
 
-An exit code is a value returned by the process when it exits.
+When a container exits, Docker records an exit code.
 
-You can inspect it with:
+An exit code helps identify how the main process ended, but it does not always explain the complete reason.
 
-```bash
-docker inspect payment-service --format '{{.State.ExitCode}}'
+| Exit code | Common interpretation |
+|---|---|
+| `0` | Process reported successful completion. |
+| `1` | Generic application failure by convention. |
+| `125` | Docker failed before it could run the requested container command. |
+| `126` | Command was found but could not be invoked. |
+| `127` | Command was not found. |
+| `137` | Commonly associated with SIGKILL (`128 + 9`). |
+| `143` | Commonly associated with SIGTERM (`128 + 15`). |
+
+### Understanding 125, 126, and 127
+
+These codes help distinguish Docker or command-start problems.
+
+```text
+125 → Docker could not perform the run request
+
+126 → Command exists but cannot be invoked correctly
+
+127 → Command could not be found
 ```
 
-Common values and conventions:
+### Understanding 137 and 143
 
-| Exit code | Common meaning |
-|---|---|
-| `0` | Process completed successfully |
-| `1` | General application failure (a common convention) |
-| `125` | Docker failed before the container command could run |
-| `126` | Command was found but could not be invoked |
-| `127` | Command was not found |
-| `137` | Often `128 + 9`, associated with `SIGKILL` |
-| `143` | Often `128 + 15`, associated with `SIGTERM` |
+Linux conventionally represents a process terminated by a signal using:
+
+```text
+128 + signal number
+```
 
 For example:
 
-- `137` commonly indicates that the process was killed with `SIGKILL`.
-- `143` commonly indicates that the process was terminated with `SIGTERM`.
+```text
+SIGKILL = 9
 
-Do not assume that exit code `137` always means an out-of-memory (OOM) kill. It can also result from another source of `SIGKILL`. Check container state, daemon events, and host-level evidence before deciding what happened.
+128 + 9 = 137
+```
 
-Signal-related exit-code conventions can also be affected by wrappers and the way the application exits.
+And:
 
-### 3.8 Remove a stopped container
+```text
+SIGTERM = 15
+
+128 + 15 = 143
+```
+
+Therefore:
+
+- Exit code `137` commonly suggests SIGKILL.
+- Exit code `143` commonly suggests SIGTERM.
+
+But do not treat these codes as complete proof of the cause.
+
+For example, exit code 137 does not automatically prove that the container was killed because of an out-of-memory condition.
+
+Possible causes include:
+
+- An explicit kill operation.
+- A stop timeout expiring.
+- Memory pressure.
+- Another external termination action.
+
+Similarly, an application may handle SIGTERM and exit with its own code.
+
+### Investigate Exit Codes with Other Evidence
+
+Use:
+
+```bash
+docker inspect --format '{{.State.ExitCode}}' payment-service
+```
+
+Then correlate the result with:
+
+- Container state.
+- Start and finish timestamps.
+- Application logs.
+- Restart count.
+- Docker daemon events.
+- Host-level evidence.
+- Application shutdown behavior.
+
+Remember:
+
+> An exit code gives you a clue. Correlated evidence helps establish the cause.
+
+## 6. Understanding docker rm
+
+When you no longer need a stopped container, you can remove it.
 
 ```bash
 docker rm payment-service
 ```
 
-This removes the container object.
+Removing a container deletes:
 
-It does not remove the image used to create the container.
+- The container object.
+- Its container identity.
+- Its writable layer.
 
-Docker normally refuses to remove a running container. Stop it first:
+It does not remove the image.
+
+It also does not normally delete separately managed volumes.
+
+### Why Should You Be Careful?
+
+Consider:
+
+```text
+payment-service → exited
+```
+
+At this point, you can still:
+
+- Inspect its configuration.
+- Read available logs.
+- Check its exit code.
+- Start the same container again.
+
+But after:
 
 ```bash
-docker stop payment-service
 docker rm payment-service
 ```
 
-You can also remove an exited container directly:
+That container identity and its writable layer are gone.
 
-```bash
-docker rm payment-service
+Use a deliberate sequence:
+
+```text
+INSPECT
+   |
+   v
+Confirm identity, state, logs, and mounts
+   |
+   v
+CONFIRM
+   |
+   v
+Make sure the container is no longer required
+   |
+   v
+REMOVE
+   |
+   v
+VERIFY
 ```
 
-Be careful with removal:
+Docker normally refuses to remove a running container.
 
-- The container object is deleted.
-- Its writable container layer is deleted.
-- You cannot start that same container again.
-- Volumes managed separately are not removed by default.
+Force-removal options exist, but they combine termination and removal. Avoid using them blindly during an incident because they can increase the impact and destroy useful evidence.
 
-Avoid force removal unless you understand the impact:
+## 7. Understanding Docker Restart Policies
 
-```bash
-docker rm -f payment-service
-```
+What happens if a container exits unexpectedly?
 
-Force removal can stop and remove a running container, so it may interrupt service and destroy useful troubleshooting evidence.
+Do you need to manually start it every time?
 
-**Important:** Removing a container is not the same as removing its image or deleting its separately managed volumes.
+Docker provides restart policies that allow the Docker daemon to attempt automatic recovery after a container exits.
 
-### 3.9 Understand Docker restart policies
-
-What happens if the main process exits unexpectedly?
-
-You can configure Docker to apply a restart policy.
-
-Example:
+The general syntax is:
 
 ```bash
-docker run -d \
-  --name payment-service \
-  --restart unless-stopped \
-  nginx
+docker run --restart POLICY IMAGE
 ```
 
-The restart policy is configured when the container is created. The common policies are:
+Restart policies include:
 
 | Policy | Behavior |
 |---|---|
-| `no` | Do not automatically restart the container (default) |
-| `on-failure` | Restart when the container exits with a non-zero exit code |
-| `on-failure:5` | Retry on failure, up to the specified retry limit |
-| `always` | Always restart the container when it exits, subject to Docker's restart behavior |
-| `unless-stopped` | Restart after exits unless it was explicitly stopped by the user or Docker |
+| `no` | Do not automatically restart. This is the default. |
+| `on-failure` | Restart when the container exits with a non-zero exit code. |
+| `always` | Restart after an exit, including after a daemon restart, subject to manual-stop behavior. |
+| `unless-stopped` | Similar to `always`, but a manually stopped container remains stopped across daemon restarts. |
 
-**`no`**
-
-```bash
-docker run -d --restart no nginx
-```
-
-Docker does not automatically restart the container when its process exits.
-
-**`on-failure`**
+### Policy 1: no
 
 ```bash
-docker run -d --restart on-failure nginx
+docker run --restart no nginx
 ```
 
-Docker restarts the container when its main process exits with a non-zero exit code.
+Docker does not automatically restart the container after it exits.
 
-You can set a retry limit:
+This is the default behavior.
+
+### Policy 2: on-failure
 
 ```bash
-docker run -d --restart on-failure:5 nginx
+docker run --restart on-failure nginx
 ```
 
-**`always`**
+Docker attempts to restart the container when its main process exits with a non-zero exit code.
+
+You can also specify a retry limit:
 
 ```bash
-docker run -d --restart always nginx
+docker run --restart on-failure:5 nginx
 ```
 
-Docker attempts to restart the container whenever it exits. This policy can also cause the container to start again when the Docker daemon restarts.
+This tells Docker to attempt a limited number of restarts after failures.
 
-**`unless-stopped`**
+It is useful when you want to avoid unlimited restart attempts.
+
+### Policy 3: always
 
 ```bash
-docker run -d --restart unless-stopped nginx
+docker run --restart always nginx
 ```
 
-This behaves similarly to `always`, but preserves an intentional manual stop across daemon restarts.
+Docker attempts to restart the container whenever it exits.
 
-### 3.10 Restart policies are not health checks
+It also starts the container again when the Docker daemon restarts.
 
-A restart policy reacts to the container's main process exiting. It does not automatically repair an application that is still running but malfunctioning.
+However, there is an important exception.
+
+If an operator manually stops the container, Docker does not immediately restart it against that manual stop request.
+
+When the Docker daemon restarts, the `always` policy can start the container again.
+
+### Policy 4: unless-stopped
+
+```bash
+docker run --restart unless-stopped nginx
+```
+
+This behaves similarly to `always`, with one important difference.
+
+If an operator manually stops the container, it remains stopped even after the Docker daemon restarts.
+
+### always vs unless-stopped
+
+This is one of the most important differences to understand.
+
+| Situation | `always` | `unless-stopped` |
+|---|---|---|
+| Container exits unexpectedly | Restart attempted | Restart attempted |
+| Docker daemon restarts | Restart attempted | Restart attempted unless manually stopped |
+| Operator manually stops container | Remains stopped for now | Remains stopped |
+| Docker daemon restarts after manual stop | Starts again | Remains stopped |
+
+Example:
+
+An operator stops a maintenance container:
+
+```bash
+docker stop maintenance-service
+```
+
+The Docker daemon is then restarted.
+
+- With `always`, Docker can start the container again.
+- With `unless-stopped`, Docker preserves the operator's stopped intent.
+
+### Restart Policy Is Not Health Management
+
+A restart policy responds to container process exits observed by the Docker daemon.
+
+It does not automatically understand whether:
+
+- The application is responding correctly.
+- A database is available.
+- An API is healthy.
+- Customers can access the service.
+- The application is stuck but still running.
 
 For example:
 
-- The web server process is running.
-- The application cannot connect to its database.
-- The container remains in the running state.
-- The restart policy may do nothing because the main process has not exited.
+```text
+Bad configuration
+       |
+       v
+Application starts
+       |
+       v
+Application exits
+       |
+       v
+Restart policy starts it again
+       |
+       v
+Same bad configuration
+       |
+       v
+Application exits again
+```
 
-A health check can help report application health, but a restart policy and a health check are different mechanisms.
+This can create a restart loop.
 
-A bad configuration can also cause repeated restarts. If the application exits immediately every time it starts, Docker may keep trying to restart it according to the configured policy.
+You can check the restart count:
 
-### 3.11 Manual stops and restart policies
+```bash
+docker inspect --format '{{.RestartCount}}' payment-service
+```
 
-Restart policies have behavior designed to respect an intentional manual stop.
+A high restart count indicates repeated restarts. It is evidence of instability, not proof of resilience.
 
-For example:
+### Restart Policies and --rm
 
-- If you manually stop a container, Docker does not immediately restart it against that stop request.
-- `always` can restart a container after the Docker daemon restarts.
-- `unless-stopped` keeps a manually stopped container stopped when the daemon restarts.
-- `on-failure` is based on a non-zero process exit; a daemon restart by itself is not a process failure.
+These two options have conflicting purposes.
 
-Do not treat restart policies as a replacement for monitoring, application health checks, or fixing the root cause.
+```text
+--rm
+  → Remove the container after it exits
+
+Restart policy
+  → Keep the container available for automatic restarting
+```
+
+Docker does not allow combining automatic removal with a restart policy.
 
 ---
 
-## 4. A Practical Container Troubleshooting Workflow
+## 8. A Practical Production Workflow
 
-When a container behaves unexpectedly, follow this order:
+Consider a production container that is not responding.
 
-### Step 1 — Find the container
+Instead of immediately restarting or removing it, follow a controlled process.
+
+### Step 1: Identify the Container
 
 ```bash
 docker ps -a
 ```
 
-Check whether it is running, exited, or still created.
+Confirm the correct container name and current state.
 
-### Step 2 — Inspect its state
+### Step 2: Inspect Its State
 
 ```bash
 docker inspect payment-service
 ```
 
-Focus on:
+Check:
 
-- `.State.Status`
-- `.State.ExitCode`
-- `.State.StartedAt`
-- `.State.FinishedAt`
-- `.RestartCount`
-- `.HostConfig.RestartPolicy`
+- Status.
+- Exit code.
+- Start and finish timestamps.
+- Restart count.
+- Image.
+- Startup configuration.
+- Restart policy.
 
-### Step 3 — Read its logs
+### Step 3: Read Its Logs
 
 ```bash
 docker logs --tail 100 payment-service
 ```
 
-Look for startup errors, dependency failures, exceptions, and shutdown messages.
+Look for application errors around the time the problem started.
 
-### Step 4 — Run a targeted check if it is running
+### Step 4: Decide What Action Is Required
 
-```bash
-docker exec payment-service printenv APP_ENV
-```
-
-Use a shell only if the image contains one:
-
-```bash
-docker exec -it payment-service sh
-```
-
-### Step 5 — Choose the right action
+Choose based on the evidence:
 
 | Situation | Possible action |
 |---|---|
-| Existing container is stopped and should run again | `docker start` |
-| Application needs a controlled restart | `docker restart` |
-| Application should shut down cleanly | `docker stop` |
-| Process must be terminated immediately | `docker kill` |
+| Container is stopped and should run again | `docker start` |
+| Running container needs a controlled restart | `docker restart` |
+| Container needs graceful shutdown | `docker stop` |
+| Immediate termination is required | `docker kill` |
 | Stopped container is no longer needed | `docker rm` |
-| Container should recover after process failure | Configure an appropriate restart policy |
 
-### Step 6 — Verify the result
+### Step 5: Verify the Result
+
+Check the container state:
 
 ```bash
 docker ps -a
-docker inspect payment-service --format '{{.State.Status}}'
-docker logs --tail 50 payment-service
 ```
 
-Do not stop at seeing `running`. Verify that the application is actually responding and that its dependencies are available.
+Inspect it again:
+
+```bash
+docker inspect --format 'status={{.State.Status}} exit={{.State.ExitCode}} restarts={{.RestartCount}}' payment-service
+```
+
+Finally, verify that the actual application responds.
+
+A running container alone does not prove that the service is working.
 
 ---
 
-## 5. Common Mistakes to Avoid
+## Episode 3: Important Takeaways
 
-1. **Assuming `docker run -d` means the container will stay running.**  
-   Detached mode only separates the container from the terminal. The main process still controls its lifetime.
-
-2. **Using `docker ps` to look for exited containers.**  
-   Use `docker ps -a` to see retained stopped containers.
-
-3. **Using `--rm` when you need to troubleshoot later.**  
-   The container is automatically removed after it exits.
-
-4. **Assuming a running container means a healthy application.**  
-   Check application logs, health checks, readiness, and dependencies.
-
-5. **Restarting before collecting evidence.**  
-   Inspect the state and logs first whenever possible.
-
-6. **Using `docker exec` on a stopped container.**  
-   `docker exec` requires a running container.
-
-7. **Assuming every image contains Bash or common Linux tools.**  
-   Minimal images may not include them.
-
-8. **Using `docker kill` as the normal shutdown command.**  
-   Prefer graceful shutdown with `docker stop` when possible.
-
-9. **Assuming exit code `137` proves an OOM event.**  
-   It commonly indicates `SIGKILL`, but more evidence is needed to identify why.
-
-10. **Assuming restart policies fix application failures.**  
-    They restart containers after qualifying process exits; they do not repair broken application configuration or dependencies.
-
-11. **Removing a container before collecting useful evidence.**  
-    Once removed, the same container object and its writable layer are gone.
+- `docker start` starts an existing stopped container.
+- `docker restart` stops and starts the same container.
+- `docker stop` normally sends SIGTERM, waits 10 seconds, then sends SIGKILL if required.
+- The stop timeout can be configured.
+- `docker kill` sends SIGKILL by default.
+- Exit codes help investigate failures but do not always prove their cause.
+- `docker rm` removes the container object and writable layer.
+- Restart policies control automatic restart attempts after container exits.
+- `always` and `unless-stopped` differ in how they handle manually stopped containers after a daemon restart.
+- Restart policies do not guarantee application health.
 
 ---
 
-## 6. Quick Command Reference
+# Module 2: Final Revision
+
+## 1. Container Lifecycle
+
+```text
+created → running → exited → removed
+```
+
+- `docker run` creates and starts a container.
+- PID 1 determines the container's running lifetime.
+- `docker ps` shows running containers.
+- `docker ps -a` shows retained containers, including exited ones.
+- `--rm` automatically removes a container after it exits.
+
+## 2. Container Investigation
 
 | Command | Purpose |
 |---|---|
-| `docker run IMAGE` | Create and start a container |
-| `docker run -d IMAGE` | Start in detached mode |
-| `docker run -it IMAGE sh` | Start an interactive shell as the main process |
-| `docker ps` | List running containers |
-| `docker ps -a` | List all retained containers |
-| `docker inspect CONTAINER` | View detailed container information |
-| `docker logs CONTAINER` | Read captured container logs |
-| `docker logs -f CONTAINER` | Follow container logs |
-| `docker exec -it CONTAINER sh` | Start an interactive shell in a running container |
-| `docker start CONTAINER` | Start an existing stopped container |
-| `docker restart CONTAINER` | Restart the same container |
-| `docker stop CONTAINER` | Gracefully stop a container, then force it if necessary |
-| `docker kill CONTAINER` | Send `SIGKILL` by default |
-| `docker rm CONTAINER` | Remove a stopped container |
-| `docker run --rm IMAGE` | Automatically remove the container after it exits |
-| `docker run --restart unless-stopped IMAGE` | Configure an automatic restart policy |
+| `docker inspect CONTAINER` | Read structured configuration and state. |
+| `docker inspect --format` | Retrieve specific values. |
+| `docker logs CONTAINER` | Read captured stdout and stderr. |
+| `docker logs -f CONTAINER` | Follow new log output. |
+| `docker exec CONTAINER COMMAND` | Start a new process inside a running container. |
+
+## 3. Container Management
+
+| Command | Purpose |
+|---|---|
+| `docker start CONTAINER` | Start an existing stopped container. |
+| `docker stop CONTAINER` | Request graceful termination. |
+| `docker restart CONTAINER` | Stop and start the same container. |
+| `docker kill CONTAINER` | Send a signal, SIGKILL by default. |
+| `docker rm CONTAINER` | Remove a stopped container. |
+
+## 4. Restart Policies
+
+| Policy | Meaning |
+|---|---|
+| `no` | No automatic restart. |
+| `on-failure` | Restart after a non-zero exit. |
+| `always` | Restart after exit and after daemon restart, subject to manual-stop behavior. |
+| `unless-stopped` | Like `always`, except a manually stopped container remains stopped across daemon restarts. |
+
+## 5. Important Concepts to Remember
+
+1. A container is not the same thing as an image.
+2. A container can exist without running.
+3. PID 1 controls the container's running lifetime.
+4. Detached mode does not guarantee that a service stays alive.
+5. `docker inspect`, `docker logs`, and `docker exec` serve different purposes.
+6. `docker exec` creates a new process; it does not replace PID 1.
+7. `docker stop` provides a graceful shutdown opportunity.
+8. `docker kill` does not provide a graceful shutdown window by default.
+9. Removing a container is different from stopping it.
+10. Restart policies do not replace proper application health monitoring.
 
 ---
 
-## 7. Check Your Understanding
+# Practical Learning Challenge
 
-Try answering these before looking back at the notes.
+Now apply all three episodes in a practical environment.
 
-1. Why can a container exit even when `docker run` returns a container ID?
-2. What is the difference between `docker ps` and `docker ps -a`?
-3. Does `-d` guarantee that a container will keep running?
-4. What happens when the main process (PID 1) exits?
-5. What is the purpose of `--rm`?
-6. Why might `docker inspect` be more useful than checking only `docker ps`?
-7. What is the difference between `docker logs` and `docker exec`?
-8. Why does exiting a shell started with `docker exec` usually not stop the container?
-9. What is the difference between `docker stop` and `docker kill`?
-10. Does exit code `137` always mean the container ran out of memory?
-11. What is the difference between `always` and `unless-stopped`?
-12. Will a restart policy necessarily restart a container whose application is unhealthy but whose main process is still running?
+## Challenge 1: Container Lifecycle
 
-### Interview perspective
+1. Start an Alpine container that prints a message and exits.
+2. Check whether it appears in `docker ps`.
+3. Use `docker ps -a` to find it.
+4. Inspect its exit code.
+5. Start the same container again.
+6. Run another disposable container using `--rm`.
 
-Be ready to explain these ideas in your own words:
+## Challenge 2: Inspect, Logs, and Exec
 
-- A container is a process with isolation, not a miniature virtual machine.
-- The main process determines whether the container is running.
-- Detached mode changes how the process is attached to your terminal; it does not change the process lifecycle.
-- `inspect`, `logs`, and `exec` answer different troubleshooting questions.
-- Graceful shutdown gives an application time to clean up.
-- Restart policies react to process exits; they are not application repair mechanisms.
-- Removing a container deletes that container object, not the image it came from.
+1. Start an Nginx container in detached mode.
+2. Give it the name `web-service`.
+3. Read its configuration using `docker inspect`.
+4. Retrieve its status using `--format`.
+5. Read its logs.
+6. Follow its logs using `docker logs -f`.
+7. Execute a command inside the running container.
+8. Open an interactive shell if one is available.
+9. Exit the shell and verify that Nginx is still running.
 
----
+## Challenge 3: Stop and Restart
 
-## 8. Final Takeaway
+1. Stop the Nginx container.
+2. Verify its state using `docker ps -a`.
+3. Start the same container again.
+4. Restart it.
+5. Inspect its restart count.
+6. Stop it and remove it deliberately.
 
-Think of container management as three stages:
+## Challenge 4: Restart Policy
 
-```text
-LIFECYCLE
-  Create → Start → Run → Exit → Remove
+Create separate test containers using:
 
-INVESTIGATION
-  Inspect → Read logs → Run targeted checks
-
-CONTROL
-  Start → Stop → Restart → Kill → Remove
-                 │
-                 └── Restart policies can automate recovery
+```bash
+--restart no
 ```
 
-The most important habit is simple:
+```bash
+--restart on-failure:5
+```
 
-**Understand the state before taking action. Collect evidence before restarting or removing a container. Verify the application after making a change.**
+```bash
+--restart always
+```
 
-That is the difference between merely running Docker commands and managing containers reliably.
+```bash
+--restart unless-stopped
+```
+
+Observe their behavior when:
+
+- The main process exits.
+- The container is manually stopped.
+- The Docker daemon restarts.
+
+Record what actually happens rather than assuming every policy behaves identically.
+
+---
+
+# Final Thought
+
+Managing containers is not just about memorizing Docker commands.
+
+It is about understanding what state a container is in, what its main process is doing, what evidence Docker has retained, and what impact your next action will have.
+
+A good operator follows this habit:
+
+```text
+OBSERVE
+   ↓
+UNDERSTAND
+   ↓
+PRESERVE EVIDENCE
+   ↓
+ACT
+   ↓
+VERIFY
+```
+
+**Do not assume a container is healthy because it is running. Do not assume it is gone because it is missing from `docker ps`. Understand its lifecycle before changing it.
